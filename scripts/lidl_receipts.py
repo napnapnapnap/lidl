@@ -16,6 +16,7 @@ import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,32 @@ def utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def parse_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def format_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def read_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
@@ -57,12 +84,16 @@ def write_json(path: Path, data: Any) -> None:
 
 
 def require_cookie(args: argparse.Namespace) -> str:
+    cached_cookie = getattr(args, "_cookie_value", None)
+    if cached_cookie:
+        return cached_cookie
     if args.cookie_stdin:
         cookie = sys.stdin.read().strip()
     else:
         cookie = args.cookie or os.environ.get("LIDL_COOKIE")
     if not cookie:
         raise SystemExit("Missing Lidl cookie. Provide --cookie or set LIDL_COOKIE to the full Cookie header.")
+    setattr(args, "_cookie_value", cookie)
     return cookie
 
 
@@ -136,10 +167,101 @@ def load_summaries(data_dir: Path) -> dict[str, Any]:
     return read_json(path)
 
 
-def fetch_details(args: argparse.Namespace) -> None:
+def summary_item_date(item: dict[str, Any]) -> datetime | None:
+    return parse_datetime(item.get("date") or item.get("purchaseDate") or item.get("createdAt"))
+
+
+def max_summary_date(export: dict[str, Any]) -> datetime | None:
+    dates = [summary_item_date(item) for item in export.get("items", [])]
+    return max((d for d in dates if d is not None), default=None)
+
+
+def min_summary_date(items: list[dict[str, Any]]) -> datetime | None:
+    dates = [summary_item_date(item) for item in items]
+    return min((d for d in dates if d is not None), default=None)
+
+
+def merge_summary_items(existing: list[dict[str, Any]], new_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for item in existing:
+        receipt_id = item.get("id")
+        if receipt_id:
+            merged[receipt_id] = item
+    for item in new_items:
+        receipt_id = item.get("id")
+        if receipt_id:
+            merged[receipt_id] = item
+
+    return sorted(
+        merged.values(),
+        key=lambda item: summary_item_date(item) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+
+
+def fetch_summaries_after(args: argparse.Namespace, since: datetime) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     cookie = require_cookie(args)
-    export = load_summaries(args.data_dir)
-    receipt_ids = [item["id"] for item in export.get("items", []) if item.get("id")]
+    headers = make_headers(cookie)
+    limiter = RateLimiter(args.rate)
+    output_path = args.data_dir / "receipts_summaries.json"
+
+    existing_export = load_summaries(args.data_dir)
+    existing_items = list(existing_export.get("items", []))
+    first_page = get_json(headers, SUMMARY_URL, {"country": args.country, "page": 1}, limiter, args.insecure)
+    size = int(first_page.get("size") or len(first_page.get("items", [])) or 10)
+    total_count = int(first_page.get("totalCount") or len(first_page.get("items", [])))
+    total_pages = max(1, math.ceil(total_count / size))
+
+    fetched_items: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        data = first_page if page == 1 else get_json(
+            headers,
+            SUMMARY_URL,
+            {"country": args.country, "page": page},
+            limiter,
+            args.insecure,
+        )
+        page_items = list(data.get("items", []))
+        fetched_items.extend(page_items)
+        page_min = min_summary_date(page_items)
+        print(
+            f"Summaries page {page}/{total_pages}: {len(page_items)} items, min date {format_datetime(page_min)}",
+            flush=True,
+        )
+        if page >= total_pages or (page_min is not None and since >= page_min):
+            break
+        page += 1
+
+    new_items = [item for item in fetched_items if (summary_item_date(item) or datetime.min.replace(tzinfo=timezone.utc)) > since]
+    merged_items = merge_summary_items(existing_items, new_items)
+    export = {
+        "fetched_at": utc_now(),
+        "page": 1,
+        "size": size,
+        "totalCount": max(total_count, len(merged_items)),
+        "items": merged_items,
+    }
+    write_json(output_path, export)
+    print(f"Saved {len(merged_items)} summaries to {output_path}; new since checkpoint: {len(new_items)}")
+    return export, new_items
+
+
+def fetch_detail(headers: dict[str, str], receipt_id: str, args: argparse.Namespace, limiter: RateLimiter) -> Any:
+    return get_json(
+        headers,
+        DETAIL_URL.format(ticket_id=receipt_id),
+        {"country": args.country, "languageCode": args.language_code},
+        limiter,
+        args.insecure,
+    )
+
+
+def fetch_details(args: argparse.Namespace, receipt_ids: list[str] | None = None) -> None:
+    cookie = require_cookie(args)
+    if receipt_ids is None:
+        export = load_summaries(args.data_dir)
+        receipt_ids = [item["id"] for item in export.get("items", []) if item.get("id")]
     raw_dir = args.data_dir / "receipts"
     raw_dir.mkdir(parents=True, exist_ok=True)
     existing = {p.stem for p in raw_dir.glob("*.json") if p.name != "_manifest.json"}
@@ -157,13 +279,7 @@ def fetch_details(args: argparse.Namespace) -> None:
 
     for index, receipt_id in enumerate(to_fetch, start=1):
         try:
-            data = get_json(
-                headers,
-                DETAIL_URL.format(ticket_id=receipt_id),
-                {"country": args.country, "languageCode": args.language_code},
-                limiter,
-                args.insecure,
-            )
+            data = fetch_detail(headers, receipt_id, args, limiter)
             write_json(raw_dir / f"{receipt_id}.json", data)
             success += 1
         except Exception as exc:  # noqa: BLE001 - report and continue
@@ -188,6 +304,136 @@ def fetch_details(args: argparse.Namespace) -> None:
         print("First errors:")
         for error in errors[:5]:
             print(f"  {error['id']}: {error['error']}")
+
+
+def command_status(args: argparse.Namespace) -> None:
+    export = load_summaries(args.data_dir)
+    newest = max_summary_date(export)
+    now = datetime.now(timezone.utc)
+    age_hours = None if newest is None else round((now - newest).total_seconds() / 3600, 2)
+    should_fetch = newest is None or now > newest + timedelta(hours=args.refresh_after_hours)
+    print(
+        json.dumps(
+            {
+                "now": format_datetime(now),
+                "fetched_at": export.get("fetched_at"),
+                "summary_count": len(export.get("items", [])),
+                "max_receipt_date": format_datetime(newest),
+                "max_receipt_age_hours": age_hours,
+                "refresh_after_hours": args.refresh_after_hours,
+                "should_fetch": should_fetch,
+            },
+            indent=2,
+        )
+    )
+
+
+def command_summaries_since(args: argparse.Namespace) -> None:
+    export = load_summaries(args.data_dir)
+    since = parse_datetime(args.since) if args.since else max_summary_date(export)
+    if since is None:
+        raise SystemExit("No checkpoint date found. Run summaries first or pass --since YYYY-MM-DD.")
+    fetch_summaries_after(args, since)
+
+
+def receipt_date(receipt: dict[str, Any]) -> datetime | None:
+    return parse_datetime(receipt.get("date"))
+
+
+def load_parsed_receipts(data_dir: Path) -> dict[str, Any]:
+    path = data_dir / "receipts_detail.json"
+    if not path.exists():
+        raise SystemExit(f"Missing {path}. Run the parse command first.")
+    return read_json(path)
+
+
+def filter_receipts(
+    receipts: list[dict[str, Any]],
+    start: datetime | None,
+    end: datetime | None,
+) -> list[dict[str, Any]]:
+    selected = []
+    for receipt in receipts:
+        dt = receipt_date(receipt)
+        if dt is None:
+            continue
+        if start is not None and dt < start:
+            continue
+        if end is not None and dt >= end:
+            continue
+        selected.append(receipt)
+    return sorted(selected, key=lambda receipt: receipt_date(receipt) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+
+
+def compact_receipt(receipt: dict[str, Any], include_articles: bool) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "id": receipt.get("id"),
+        "date": receipt.get("date"),
+        "store_name": receipt.get("store_name"),
+        "total_amount": receipt.get("total_amount"),
+        "article_count": receipt.get("article_count"),
+        "discount_count": receipt.get("discount_count"),
+    }
+    if include_articles:
+        result["articles"] = [
+            {
+                "description": article.get("description"),
+                "quantity": article.get("quantity"),
+                "unit_price": article.get("unit_price"),
+                "line_total": article.get("line_total"),
+            }
+            for article in receipt.get("articles", [])
+        ]
+        result["discounts"] = receipt.get("discounts", [])
+    return result
+
+
+def command_query(args: argparse.Namespace) -> None:
+    parsed = load_parsed_receipts(args.data_dir)
+    now = datetime.now(timezone.utc)
+    start = parse_datetime(args.start) if args.start else None
+    end = parse_datetime(args.end) if args.end else None
+    if args.days is not None:
+        start = now - timedelta(days=args.days)
+    selected = filter_receipts(parsed.get("receipts", []), start, end)
+    output = {
+        "start": format_datetime(start),
+        "end": format_datetime(end),
+        "receipt_count": len(selected),
+        "total_spent": round(sum(receipt.get("total_amount") or 0 for receipt in selected), 2),
+        "receipts": [compact_receipt(receipt, args.include_articles) for receipt in selected],
+    }
+    print(json.dumps(output, indent=2, ensure_ascii=False))
+
+
+def command_update(args: argparse.Namespace) -> None:
+    export = load_summaries(args.data_dir)
+    checkpoint = max_summary_date(export)
+    if checkpoint is None:
+        raise SystemExit("No checkpoint date found. Run summaries first.")
+
+    _, new_items = fetch_summaries_after(args, checkpoint)
+    new_ids = [item["id"] for item in new_items if item.get("id")]
+    if new_ids:
+        fetch_details(args, new_ids)
+        parse_receipts(args)
+        parsed = load_parsed_receipts(args.data_dir)
+        new_id_set = set(new_ids)
+        selected = [receipt for receipt in parsed.get("receipts", []) if receipt.get("id") in new_id_set]
+        selected = sorted(
+            selected,
+            key=lambda receipt: receipt_date(receipt) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        output = {
+            "checkpoint": format_datetime(checkpoint),
+            "new_receipt_count": len(selected),
+            "total_spent": round(sum(receipt.get("total_amount") or 0 for receipt in selected), 2),
+            "receipts": [compact_receipt(receipt, args.include_articles) for receipt in selected],
+        }
+        print(json.dumps(output, indent=2, ensure_ascii=False))
+    else:
+        print("No new receipt summaries found.")
 
 
 def parse_float(value: str | None) -> float | None:
@@ -361,7 +607,10 @@ def parse_receipts(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fetch and parse Lidl UK digital receipts.")
-    parser.add_argument("command", choices=["summaries", "details", "parse", "all"])
+    parser.add_argument(
+        "command",
+        choices=["summaries", "summaries-since", "details", "parse", "all", "update", "status", "query"],
+    )
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
     parser.add_argument("--country", default="GB")
     parser.add_argument("--language-code", default="en-GB")
@@ -369,6 +618,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cookie-stdin", action="store_true", help="Read the full Lidl Cookie header from stdin.")
     parser.add_argument("--rate", type=float, default=3.0, help="Maximum API requests per second.")
     parser.add_argument("--insecure", action="store_true", help="Disable TLS certificate verification.")
+    parser.add_argument("--since", help="Checkpoint date for summaries-since, for example 2026-05-07.")
+    parser.add_argument("--refresh-after-hours", type=float, default=6.0)
+    parser.add_argument("--start", help="Inclusive query start date/datetime, for example 2026-05-07.")
+    parser.add_argument("--end", help="Exclusive query end date/datetime, for example 2026-05-08.")
+    parser.add_argument("--days", type=float, help="Query receipts from the last N days.")
+    parser.add_argument("--include-articles", action="store_true", help="Include article and discount lines in query output.")
     return parser
 
 
@@ -378,10 +633,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command in {"summaries", "all"}:
         fetch_summaries(args)
+    if args.command == "summaries-since":
+        command_summaries_since(args)
     if args.command in {"details", "all"}:
         fetch_details(args)
     if args.command in {"parse", "all"}:
         parse_receipts(args)
+    if args.command == "update":
+        command_update(args)
+    if args.command == "status":
+        command_status(args)
+    if args.command == "query":
+        command_query(args)
     return 0
 
 

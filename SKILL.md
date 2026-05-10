@@ -13,11 +13,21 @@ Use this skill to export a user's Lidl UK receipt history into deterministic loc
 - `./data/receipts/{id}.json` for each raw receipt detail response.
 - `./data/receipts_detail.json` for parsed receipt, article, discount, VAT, payment, and spend data.
 
-Always ask the user for a fresh Lidl cookie copied from Chrome DevTools before making API requests. Do not hardcode or commit cookies.
+Ask the user for a fresh Lidl cookie copied from Chrome DevTools before making API requests. Do not hardcode or commit cookies.
 
 ## Workflow
 
-1. Ask the user for the full request `Cookie` header from a logged-in `lidl.co.uk` Chrome session.
+For local analysis questions, use existing JSON files first. Only ask for a fresh Lidl cookie when an API refresh is needed.
+
+Common fast paths:
+
+- "What did I buy yesterday / in the past few days?" Run `query` against `./data/receipts_detail.json`; do not call the Lidl API unless the user asks for a refresh or the requested date range may not be present locally.
+- "Have I bought anything since last time we checked?" or "Show me what I bought since last time we checked" Run `update --include-articles` once. It loads `./data/receipts_summaries.json`, finds the max date among `items`, fetches summary pages only until that checkpoint date is covered, fetches details only for new receipt ids, parses, prints the new receipts, then stops.
+- "Should I refresh?" Run `status`. It prints current UTC time, max receipt date, and whether the max receipt date is older than `--refresh-after-hours` (default `6`).
+
+Full export workflow:
+
+1. Ask the user for the full request `Cookie` header from a logged-in `lidl.co.uk` Chrome session when API requests are required.
 2. Run the helper script from the repository root. Prefer passing the cookie via `LIDL_COOKIE` so it does not appear in shell history.
 3. Fetch summaries first. The script reads `totalCount` and page `size` to request every summary page.
 4. Fetch detail JSON next. The script skips existing `./data/receipts/{id}.json` files, so interrupted runs can resume.
@@ -35,8 +45,13 @@ Useful subcommands:
 
 ```bash
 LIDL_COOKIE='...' python3 scripts/lidl_receipts.py summaries
+LIDL_COOKIE='...' python3 scripts/lidl_receipts.py update --include-articles
+LIDL_COOKIE='...' python3 scripts/lidl_receipts.py summaries-since
 LIDL_COOKIE='...' python3 scripts/lidl_receipts.py details
 python3 scripts/lidl_receipts.py parse
+python3 scripts/lidl_receipts.py status
+python3 scripts/lidl_receipts.py query --start 2026-05-07 --end 2026-05-08 --include-articles
+python3 scripts/lidl_receipts.py query --days 3 --include-articles
 ```
 
 When an agent already has the cookie in conversation context, prefer stdin to avoid putting the cookie on the process command line:
@@ -57,6 +72,26 @@ Default options:
 Use `--data-dir`, `--country`, `--language-code`, or `--rate` only when the user asks or local context requires it.
 
 Use `--insecure` only when the local Python TLS trust store rejects the connection with a certificate-chain error in a controlled environment.
+
+## Efficient Query Recipes
+
+For "since last time we checked":
+
+```bash
+LIDL_COOKIE='...' python3 scripts/lidl_receipts.py update --include-articles
+```
+
+If you only need to know whether a refresh is likely needed:
+
+```bash
+python3 scripts/lidl_receipts.py status
+```
+
+For date-range questions, calculate explicit date boundaries and use `query`. `--start` is inclusive and `--end` is exclusive:
+
+```bash
+python3 scripts/lidl_receipts.py query --start 2026-05-09 --end 2026-05-10 --include-articles
+```
 
 ## Output Contract
 
