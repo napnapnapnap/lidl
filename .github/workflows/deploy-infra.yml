@@ -15,6 +15,9 @@ jobs:
   terraform:
     name: Terraform Apply
     runs-on: ubuntu-latest
+    concurrency:
+      group: terraform
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -35,8 +38,7 @@ jobs:
         working-directory: infra
         run: |
           terraform init \
-            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-            -backend-config="prefix=terraform/lidl"
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
 
       - name: Terraform Validate
         working-directory: infra

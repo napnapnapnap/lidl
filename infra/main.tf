@@ -93,7 +93,9 @@ resource "google_compute_instance" "vm" {
     startup-script = file("${path.module}/startup.sh")
   }
 
-  # Prevent Terraform from re-running startup-script on every plan
+  # startup-script changes are ignored to avoid VM replacement on every plan.
+  # To apply an updated startup.sh: SSH in and run it manually, or
+  # reset the VM via: gcloud compute instances reset lidl-bot --zone=us-west1-a
   lifecycle {
     ignore_changes = [metadata["startup-script"]]
   }
