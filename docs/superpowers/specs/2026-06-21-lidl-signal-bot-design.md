@@ -51,7 +51,16 @@ Workload Identity Federation (OIDC) — no service account key files stored as s
 
 ## 2. Services (Docker Compose)
 
-Three containers on an internal bridge network (`lidl-net`). No ports are exposed to the host except n8n's `5678` bound to `127.0.0.1`.
+Two compose files live in `docker/`:
+
+| File | Purpose |
+|---|---|
+| `docker-compose.yml` | Production — volumes from `/data` (persistent disk), no exposed ports |
+| `docker-compose.dev.yml` | Local dev — volumes from `./dev-data/`, ports exposed, env from `.env.dev` |
+
+Run locally: `docker compose -f docker/docker-compose.dev.yml up --build`
+
+The prod file is used by the deploy-app GitHub Actions workflow. The dev file is for iterating locally without GCE.
 
 ### Containers
 
@@ -70,7 +79,9 @@ Three containers on an internal bridge network (`lidl-net`). No ports are expose
 | lidl-api | `/data/receipts` | `/data` |
 | lidl-api | `./scripts` | `/scripts` (read-only) |
 
-### Environment variables (injected at deploy time from GitHub Secrets)
+### Environment variables
+
+**Production** — injected at deploy time from GitHub Secrets via `docker-compose.yml`:
 
 | Variable | Used by | Purpose |
 |---|---|---|
@@ -79,6 +90,11 @@ Three containers on an internal bridge network (`lidl-net`). No ports are expose
 | `LIDL_COUNTRY` | lidl-api | API country code (default: `GB`) |
 | `N8N_ENCRYPTION_KEY` | n8n | Encrypts stored credentials |
 | `SIGNAL_PHONE_NUMBER` | signal-cli-rest-api | The linked Signal account number |
+| `SIGNAL_GROUP_ID` | n8n | Target Signal group for bot messages |
+
+**Local dev** — sourced from `docker/.env.dev` (git-ignored):
+
+Same variables, set to local/test values. `.env.dev.example` committed as a template.
 
 ---
 
