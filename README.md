@@ -1,147 +1,160 @@
-# Lidl Receipt Skill
+# Lidl Shopping Bot
 
-An agent skill for exporting and parsing Lidl UK digital receipts from the Lidl purchase-history API.
+A self-hosted Signal bot that fetches your Lidl digital receipts and sends weekly shopping suggestions to a Signal group. Runs on a GCP e2-micro VM (free tier) deployed via Terraform and GitHub Actions.
 
-The skill downloads receipt summaries, resumes missing receipt detail downloads, and parses each receipt's `htmlPrintedReceipt` into structured JSON for analysis.
+## What It Does
 
-## What It Creates
+- **Weekly suggestions** — every Sunday, posts your top purchased items (last 30 days) to a Signal group
+- **On-demand** — reply `/shopping` (or `/shopping --days 14`) in the group to get suggestions at any time
+- **Auto-sync** — daily receipt sync keeps the data fresh from your Lidl account
 
-- `data/receipts_summaries.json`: paginated receipt summaries from Lidl.
-- `data/receipts/{id}.json`: raw JSON detail response for each receipt.
-- `data/receipts_detail.json`: parsed receipt, article, discount, VAT, payment, and spend data.
+## Architecture
 
-The `data/` directory is ignored by git because it contains personal receipt data.
+```
+Signal group
+    │  /shopping command
+    ▼
+signal-cli-rest-api  ←──────────────────────────────┐
+    │  polled every minute                           │
+    ▼                                               │
+n8n (workflow engine)                               │
+    │  GET /top?days=N                              │ POST /v2/send
+    ▼                                               │
+lidl-api (FastAPI)  ←── scripts/lidl_receipts.py   │
+    │  fetches from lidl.fr                         │
+    ▼                                               │
+/data/receipts/ ─────────────────────────────────────
+```
 
-## Skill Layout
+All three containers run on a single GCE e2-micro instance with a 10 GB persistent data disk.
 
-```text
-.
-├── SKILL.md
-├── README.md
+## Repository Layout
+
+```
+├── infra/                  Terraform — GCP VM, disk, firewall, OIDC
+├── docker/
+│   ├── docker-compose.yml  Production compose (n8n + signal-cli + lidl-api)
+│   ├── lidl-api/           FastAPI wrapper around lidl_receipts.py
+│   └── n8n/workflows/      4 n8n workflow JSON files
 ├── scripts/
-│   └── lidl_receipts.py
-└── .gitignore
+│   └── lidl_receipts.py    Lidl receipt fetcher/parser (standalone CLI)
+└── Makefile                SSH helpers (ssh-vm, ssh-tunnel, signal-link, setup-workflows)
 ```
 
-`SKILL.md` is the portable agent skill entrypoint. `scripts/lidl_receipts.py` is the deterministic helper used by agents to fetch and parse the data.
+## Prerequisites
 
-## Requirements
+- GCP project with billing enabled
+- A Lidl account with purchase history enabled
+- A Signal account for the bot phone number
+- GitHub repository with Actions enabled
 
-- Python 3.10 or newer.
-- For automatic login: Python Playwright with a browser installed.
-- For legacy cookie mode: a logged-in Lidl UK browser session and a fresh `Cookie` request header copied from Chrome DevTools.
+## Setup
 
-Most receipt parsing uses only Python's standard library. Browser login requires Playwright:
+### 1 — GCP infrastructure
 
 ```bash
-python3 -m pip install playwright
-python3 -m playwright install chromium
+cd infra
+cp terraform.tfvars.example terraform.tfvars   # fill in project_id, region, ssh key
+terraform init
+terraform apply
 ```
 
-## Smoke Test
+This creates the VM, persistent disk, firewall rules, and a Workload Identity pool for GitHub Actions OIDC.
+
+### 2 — GitHub secrets
+
+| Secret | Value |
+|---|---|
+| `GCP_PROJECT_ID` | your GCP project ID |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Workload Identity provider resource name |
+| `GCP_SERVICE_ACCOUNT` | service account email |
+| `VM_IP` | VM external IP from Terraform output |
+| `SSH_PRIVATE_KEY` | private key matching the public key in `terraform.tfvars` |
+| `LIDL_EMAIL` | Lidl account email |
+| `LIDL_PASSWORD` | Lidl account password |
+| `LIDL_COUNTRY` | country code, e.g. `FR`, `DE`, `GB` |
+| `N8N_ENCRYPTION_KEY` | random 32-char string for n8n credential encryption |
+| `SIGNAL_PHONE_NUMBER` | bot phone number in E.164 format, e.g. `+33612345678` |
+| `SIGNAL_GROUP_ID` | Signal group ID (see step 5) |
+
+### 3 — Deploy the app
+
+Push to `main` or trigger the **Deploy App** workflow manually. It clones the repo on the VM, writes `docker/.env`, and runs `docker compose up -d`.
+
+### 4 — Import n8n workflows
 
 ```bash
-make smoke
+make setup-workflows VM_IP=<ip>
 ```
 
-## Usage
-
-From the repo root:
+Then open the n8n UI to create your owner account:
 
 ```bash
-python3 scripts/lidl_receipts.py auth-check --login --auth-interactive --auth-browser-channel chrome
-python3 scripts/lidl_receipts.py update --login --include-articles
+make ssh-tunnel VM_IP=<ip>   # forwards :5678 to localhost
+# open http://localhost:5678
 ```
 
-The first command opens a browser, lets the user complete Lidl login manually, validates receipt API access, and saves Playwright storage state to `data/lidl_auth_state.json`. Later commands reuse that saved state and do not need cookie pasting.
-
-Subcommands:
+### 5 — Link Signal
 
 ```bash
-python3 scripts/lidl_receipts.py auth-check --login
-python3 scripts/lidl_receipts.py summaries --login
-python3 scripts/lidl_receipts.py update --login --include-articles
-python3 scripts/lidl_receipts.py summaries-since --login
-python3 scripts/lidl_receipts.py details --login
-python3 scripts/lidl_receipts.py parse
-python3 scripts/lidl_receipts.py status
-python3 scripts/lidl_receipts.py query --days 3 --include-articles
+make signal-link VM_IP=<ip>
 ```
 
-`update` is optimized for "since last time we checked" questions. It reads the current `data/receipts_summaries.json`, uses the newest saved summary date as the checkpoint, fetches only enough paginated summary pages to cover newer receipts, downloads details only for new ids, reparses, and prints the new receipts.
+Scan the QR code in Signal → **Settings → Linked Devices → Link New Device**.
 
-`query` is optimized for local date-range questions and does not call Lidl:
+### 6 — Get the group ID and add the secret
 
 ```bash
-python3 scripts/lidl_receipts.py query --start 2026-05-09 --end 2026-05-10 --include-articles
+ssh -i ~/.ssh/lidl_bot debian@<ip> \
+  "curl -s http://localhost:8080/v1/groups/+<number>"
 ```
 
-If an agent already has the cookie in context, it can avoid putting the cookie on the process command line:
+Copy the `id` field, add it as the `SIGNAL_GROUP_ID` secret in GitHub, then update the `.env` on the VM and restart:
 
 ```bash
-python3 scripts/lidl_receipts.py all --cookie-stdin
+ssh -i ~/.ssh/lidl_bot debian@<ip> \
+  "echo 'SIGNAL_GROUP_ID=<id>' >> /opt/lidl/docker/.env && \
+   cd /opt/lidl/docker && docker compose up -d"
 ```
 
-Legacy copied-cookie mode still works:
+### 7 — First receipt sync
 
 ```bash
-LIDL_COOKIE='copy the full Cookie header here' python3 scripts/lidl_receipts.py all
+ssh -i ~/.ssh/lidl_bot debian@<ip> \
+  "curl -s -X POST http://localhost:8000/update"
 ```
 
-This is the recommended fallback for headless VMs or remote agents where no interactive browser UI is available:
+Watch progress: `docker compose logs -f lidl-api`
+
+## Signal Commands
+
+| Command | Description |
+|---|---|
+| `/shopping` | Top items from the last 30 days |
+| `/shopping --days 14` | Top items from the last N days |
+
+The bot polls for messages every minute, so expect up to a 60-second response delay.
+
+## Country Support
+
+Set `LIDL_COUNTRY` to your ISO country code. Supported: `FR`, `DE`, `AT`, `BE`, `CH`, `ES`, `IT`, `LU`, `NL`, `PL`, `PT`, `CZ`, `SK`, `HU`, `RO`, `HR`, `SI`, `BG`, `RS`, `GB` (→ `lidl.co.uk`).
+
+## Updating
+
+Push changes to `main` — the Deploy App action runs automatically for changes under `docker/` or `scripts/`. Infrastructure changes require `terraform apply`.
+
+## `lidl_receipts.py` CLI
+
+The receipt fetcher also works standalone:
 
 ```bash
-python3 scripts/lidl_receipts.py update --include-articles --cookie-stdin
+python3 scripts/lidl_receipts.py auth-check --login --auth-interactive
+python3 scripts/lidl_receipts.py update --login --country FR
+python3 scripts/lidl_receipts.py query --days 30 --include-articles
 ```
 
-## Lidl Authentication
-
-The Lidl UK site uses an OpenID Connect authorization-code flow with PKCE. Visiting `https://www.lidl.co.uk/mla/` redirects to `https://accounts.lidl.com/Account/Login?...`, then a successful login redirects back to `https://www.lidl.co.uk/user-api/signin-oidc`. The Lidl site then sets first-party cookies on `www.lidl.co.uk`; the receipt endpoints under `/mre/api/v1/tickets` authenticate with those cookies.
-
-The important post-login cookies observed for receipt access include `ldi-user-context`, `authToken`, `ldi-session-info`, `ldi-customertoken`, `tracking-info`, and `customer-info`. The script does not store or print a raw Cookie header. It stores Playwright browser storage state under `data/lidl_auth_state.json`, which is git-ignored with the rest of `data/`.
-
-Pure headless credential submission can be rejected by Lidl's anti-bot checks with `Oops! something went wrong, please try again later.` When that happens, use the interactive login bootstrap:
-
-```bash
-python3 scripts/lidl_receipts.py auth-check --login --auth-interactive --auth-browser-channel chrome --auth-timeout 180
-```
-
-For agent use, prefer this setup:
-
-- First run: ask the user to complete `auth-check --login --auth-interactive` in the opened browser.
-- Later runs: use `--login`; the script reuses `data/lidl_auth_state.json`.
-- If the cached state expires: repeat the interactive bootstrap.
-- On VMs or headless agent environments without browser UI: ask the user for a fresh full `Cookie` request header and pass it through `LIDL_COOKIE` or `--cookie-stdin`.
-- If explicit credentials are appropriate for the environment: pass the email via `LIDL_EMAIL` and the password via `LIDL_PASSWORD`, or use `--email` with `--password-stdin`. Do not put passwords in README examples, shell history, commits, or final answers.
-
-## Options
-
-- `--data-dir`: output directory, default `data`.
-- `--country`: country code, default `GB`.
-- `--language-code`: receipt language, default `en-GB`.
-- `--cookie`: full Lidl Cookie header. Prefer `LIDL_COOKIE` instead.
-- `--cookie-stdin`: read the full Lidl Cookie header from stdin.
-- `--login`: derive a Cookie header with Playwright browser auth or cached storage state.
-- `--email`: Lidl login email. Prefer `LIDL_EMAIL` for agent runs.
-- `--password-stdin`: read the Lidl password from stdin.
-- `--auth-state`: custom Playwright storage-state path, default `data/lidl_auth_state.json`.
-- `--no-auth-state`: do not read or write browser auth state.
-- `--auth-headed`: show the browser during automated credential login.
-- `--auth-interactive`: open a browser and wait for the user to complete login manually.
-- `--auth-browser-channel`: optional Playwright browser channel, for example `chrome`.
-- `--rate`: maximum API requests per second, default `3`.
-- `--insecure`: disable TLS certificate verification only when the local Python trust store rejects the connection in a controlled environment.
-- `--refresh-after-hours`: age threshold used by `status`, default `6`.
-- `--start` / `--end`: inclusive start and exclusive end for `query`.
-- `--days`: query receipts from the last N days.
-- `--include-articles`: include article and discount lines in `query` or `update` output.
-
-## Privacy And Safety
-
-Do not commit credentials, cookies, access tokens, Playwright auth state, raw receipts, or parsed receipt data.
-
-The script skips existing files under `data/receipts/`, so interrupted detail downloads can be resumed safely.
+Run `python3 scripts/lidl_receipts.py --help` for all options.
 
 ## Disclaimer
 
-This project is unofficial and is not affiliated with, endorsed by, or supported by Lidl.
+Unofficial project. Not affiliated with or endorsed by Lidl.
