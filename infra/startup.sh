@@ -53,12 +53,28 @@ fi
 mkdir -p /data/n8n /data/signal-cli /data/receipts
 chmod -R 777 /data
 
-# ── Docker data root on persistent disk ───────────────────────────────────────
+# ── Docker + containerd data on persistent disk ───────────────────────────────
 # Playwright + n8n images are ~1.5 GB total — too large for the 10 GB boot disk.
-# Moving Docker's storage to /data keeps the OS disk free.
+# Both Docker and containerd must be redirected; daemon.json only covers Docker.
+# Containerd is moved via symlink so its config needs no changes.
 mkdir -p /data/docker
+
 DAEMON_JSON=/etc/docker/daemon.json
-if ! grep -q '\"data-root\"' "$DAEMON_JSON" 2>/dev/null; then
+if ! grep -q '"data-root"' "$DAEMON_JSON" 2>/dev/null; then
   echo '{"data-root": "/data/docker"}' > "$DAEMON_JSON"
-  systemctl restart docker
+  RESTART_DOCKER=1
+fi
+
+if [ ! -L /var/lib/containerd ] && [ -d /var/lib/containerd ]; then
+  systemctl stop docker containerd
+  mv /var/lib/containerd /data/containerd
+  ln -s /data/containerd /var/lib/containerd
+  RESTART_DOCKER=1
+elif [ ! -e /var/lib/containerd ]; then
+  mkdir -p /data/containerd
+  ln -s /data/containerd /var/lib/containerd
+fi
+
+if [ "${RESTART_DOCKER:-0}" = "1" ]; then
+  systemctl restart containerd docker
 fi
