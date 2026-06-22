@@ -43,7 +43,7 @@ resource "google_compute_firewall" "ssh" {
 resource "google_compute_disk" "data" {
   count = var.existing_data_disk_name == "" ? 1 : 0
   name  = "lidl-bot-data"
-  size  = 10
+  size  = 20
   type  = "pd-standard"
   zone  = var.zone
 }

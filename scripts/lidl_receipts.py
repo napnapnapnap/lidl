@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import glob
 import getpass
+import gzip
 import html
 import json
 import math
@@ -236,25 +237,21 @@ def login_with_browser(args: argparse.Namespace) -> str:
         return cookie_header_from_cookies(ctx.cookies([base_url]), lidl_domain=domain)
 
     state_path = auth_state_path(args)
+
+    if state_path and state_path.exists():
+        cookie = cookie_header_from_auth_state(state_path, lidl_domain=domain)
+        if cookie and validate_cookie(args, cookie):
+            print_err(f"Using saved Lidl auth state from {state_path}.")
+            return cookie
+        print_err("Saved Lidl auth state is missing or expired; logging in again.")
+
     headed = args.auth_headed or args.auth_interactive
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=not headed, channel=args.auth_browser_channel)
-
-        if state_path and state_path.exists():
-            context = browser.new_context(locale=locale, storage_state=str(state_path))
-            page = context.new_page()
-            page.goto(home_url, wait_until="domcontentloaded", timeout=args.auth_timeout * 1000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=10_000)
-            except PlaywrightTimeoutError:
-                pass
-            cookie = _get_cookie(context)
-            if cookie and validate_cookie(args, cookie):
-                browser.close()
-                print_err(f"Using saved Lidl browser auth state from {state_path}.")
-                return cookie
-            context.close()
-            print_err("Saved Lidl browser auth state is missing or expired; logging in again.")
+        browser = playwright.chromium.launch(
+            headless=not headed,
+            channel=args.auth_browser_channel,
+            args=["--disable-dev-shm-usage", "--no-sandbox", "--disable-setuid-sandbox"],
+        )
 
         context = browser.new_context(locale=locale)
         page = context.new_page()
@@ -351,9 +348,15 @@ def get_json(
     context = ssl._create_unverified_context() if insecure else None
     try:
         with urllib.request.urlopen(request, timeout=30, context=context) as response:
-            body = response.read().decode("utf-8")
+            raw = response.read()
+            if raw[:2] == b"\x1f\x8b":
+                raw = gzip.decompress(raw)
+            body = raw.decode("utf-8")
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
+        raw = exc.read()
+        if raw[:2] == b"\x1f\x8b":
+            raw = gzip.decompress(raw)
+        body = raw.decode("utf-8", errors="replace")
         if exc.code in {401, 403}:
             raise RuntimeError(f"HTTP {exc.code}: Lidl session cookie is expired or unauthorized") from exc
         raise RuntimeError(f"HTTP {exc.code}: {body[:200]}") from exc
