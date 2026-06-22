@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch and parse Lidl UK digital receipts."""
+"""Fetch and parse Lidl digital receipts."""
 
 from __future__ import annotations
 
@@ -21,10 +21,44 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-SUMMARY_URL = "https://www.lidl.co.uk/mre/api/v1/tickets"
-DETAIL_URL = "https://www.lidl.co.uk/mre/api/v1/tickets/{ticket_id}"
-LIDL_HOME_URL = "https://www.lidl.co.uk/mla/"
 DEFAULT_AUTH_STATE_FILENAME = "lidl_auth_state.json"
+
+COUNTRY_DOMAINS: dict[str, str] = {
+    "GB": "www.lidl.co.uk",
+    "FR": "www.lidl.fr",
+    "DE": "www.lidl.de",
+    "AT": "www.lidl.at",
+    "BE": "www.lidl.be",
+    "CH": "www.lidl.ch",
+    "ES": "www.lidl.es",
+    "IT": "www.lidl.it",
+    "LU": "www.lidl.lu",
+    "NL": "www.lidl.nl",
+    "PL": "www.lidl.pl",
+    "PT": "www.lidl.pt",
+    "CZ": "www.lidl.cz",
+    "SK": "www.lidl.sk",
+    "HU": "www.lidl.hu",
+    "RO": "www.lidl.ro",
+    "HR": "www.lidl.hr",
+    "SI": "www.lidl.si",
+    "BG": "www.lidl.bg",
+    "RS": "www.lidl.rs",
+    "US": "www.lidlus.com",
+}
+
+COUNTRY_LOCALES: dict[str, str] = {
+    "GB": "en-GB", "FR": "fr-FR", "DE": "de-DE", "AT": "de-AT",
+    "BE": "fr-BE", "NL": "nl-NL", "ES": "es-ES", "IT": "it-IT",
+    "PL": "pl-PL", "PT": "pt-PT", "CZ": "cs-CZ", "SK": "sk-SK",
+    "HU": "hu-HU", "RO": "ro-RO", "HR": "hr-HR", "SI": "sl-SI",
+    "BG": "bg-BG", "RS": "sr-RS",
+}
+
+
+def lidl_base_url(country: str) -> str:
+    domain = COUNTRY_DOMAINS.get(country.upper(), f"www.lidl.{country.lower()}")
+    return f"https://{domain}"
 
 
 class RateLimiter:
@@ -98,7 +132,11 @@ def auth_state_path(args: argparse.Namespace) -> Path | None:
     return args.data_dir / DEFAULT_AUTH_STATE_FILENAME
 
 
-def cookie_header_from_cookies(cookies: list[dict[str, Any]], request_path: str = "/mre/api/v1/tickets") -> str:
+def cookie_header_from_cookies(
+    cookies: list[dict[str, Any]],
+    request_path: str = "/mre/api/v1/tickets",
+    lidl_domain: str = "www.lidl.co.uk",
+) -> str:
     now = time.time()
     pairs = []
     for cookie in cookies:
@@ -108,7 +146,7 @@ def cookie_header_from_cookies(cookies: list[dict[str, Any]], request_path: str 
             continue
 
         domain = str(cookie.get("domain") or "").lstrip(".")
-        if domain and domain != "www.lidl.co.uk" and not "www.lidl.co.uk".endswith(f".{domain}"):
+        if domain and domain != lidl_domain and not lidl_domain.endswith(f".{domain}"):
             continue
 
         path = str(cookie.get("path") or "/")
@@ -124,7 +162,7 @@ def cookie_header_from_cookies(cookies: list[dict[str, Any]], request_path: str 
     return "; ".join(pairs)
 
 
-def cookie_header_from_auth_state(path: Path) -> str | None:
+def cookie_header_from_auth_state(path: Path, lidl_domain: str = "www.lidl.co.uk") -> str | None:
     if not path.exists():
         return None
     try:
@@ -132,15 +170,16 @@ def cookie_header_from_auth_state(path: Path) -> str | None:
     except Exception as exc:  # noqa: BLE001 - explain the bad cache and continue to other auth sources
         print_err(f"Ignoring unreadable Lidl auth state {path}: {exc}")
         return None
-    cookie = cookie_header_from_cookies(list(state.get("cookies", [])))
+    cookie = cookie_header_from_cookies(list(state.get("cookies", [])), lidl_domain=lidl_domain)
     return cookie or None
 
 
 def validate_cookie(args: argparse.Namespace, cookie: str) -> bool:
+    base_url = lidl_base_url(args.country)
     try:
         get_json(
-            make_headers(cookie),
-            SUMMARY_URL,
+            make_headers(cookie, base_url),
+            f"{base_url}/mre/api/v1/tickets",
             {"country": args.country, "page": 1},
             RateLimiter(0),
             args.insecure,
@@ -188,20 +227,28 @@ def login_with_browser(args: argparse.Namespace) -> str:
             "`python3 -m pip install playwright` and `python3 -m playwright install chromium`."
         ) from exc
 
+    base_url = lidl_base_url(args.country)
+    home_url = f"{base_url}/mla/"
+    locale = COUNTRY_LOCALES.get(args.country.upper(), "en-GB")
+    domain = COUNTRY_DOMAINS.get(args.country.upper(), f"www.lidl.{args.country.lower()}")
+
+    def _get_cookie(ctx) -> str:
+        return cookie_header_from_cookies(ctx.cookies([base_url]), lidl_domain=domain)
+
     state_path = auth_state_path(args)
     headed = args.auth_headed or args.auth_interactive
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=not headed, channel=args.auth_browser_channel)
 
         if state_path and state_path.exists():
-            context = browser.new_context(locale="en-GB", storage_state=str(state_path))
+            context = browser.new_context(locale=locale, storage_state=str(state_path))
             page = context.new_page()
-            page.goto(LIDL_HOME_URL, wait_until="domcontentloaded", timeout=args.auth_timeout * 1000)
+            page.goto(home_url, wait_until="domcontentloaded", timeout=args.auth_timeout * 1000)
             try:
                 page.wait_for_load_state("networkidle", timeout=10_000)
             except PlaywrightTimeoutError:
                 pass
-            cookie = cookie_header_from_cookies(context.cookies(["https://www.lidl.co.uk"]))
+            cookie = _get_cookie(context)
             if cookie and validate_cookie(args, cookie):
                 browser.close()
                 print_err(f"Using saved Lidl browser auth state from {state_path}.")
@@ -209,14 +256,14 @@ def login_with_browser(args: argparse.Namespace) -> str:
             context.close()
             print_err("Saved Lidl browser auth state is missing or expired; logging in again.")
 
-        context = browser.new_context(locale="en-GB")
+        context = browser.new_context(locale=locale)
         page = context.new_page()
-        page.goto(LIDL_HOME_URL, wait_until="domcontentloaded", timeout=args.auth_timeout * 1000)
+        page.goto(home_url, wait_until="domcontentloaded", timeout=args.auth_timeout * 1000)
 
         if args.auth_interactive:
             print_err(
                 "Complete the Lidl login in the opened browser window. "
-                "The script will continue after the browser reaches www.lidl.co.uk/mla/."
+                f"The script will continue after the browser reaches {base_url}/mla/."
             )
         elif "accounts.lidl.com" in page.url:
             email, password = resolve_login_credentials(args)
@@ -231,7 +278,7 @@ def login_with_browser(args: argparse.Namespace) -> str:
             page.locator('[data-testid="button-primary"]').click(timeout=15_000)
 
         try:
-            page.wait_for_url("https://www.lidl.co.uk/mla/**", timeout=args.auth_timeout * 1000)
+            page.wait_for_url(f"{base_url}/mla/**", timeout=args.auth_timeout * 1000)
         except PlaywrightTimeoutError:
             pass
         try:
@@ -239,7 +286,7 @@ def login_with_browser(args: argparse.Namespace) -> str:
         except PlaywrightTimeoutError:
             pass
 
-        cookie = cookie_header_from_cookies(context.cookies(["https://www.lidl.co.uk"]))
+        cookie = _get_cookie(context)
         if not cookie or not validate_cookie(args, cookie):
             current_url = page.url
             browser.close()
@@ -281,11 +328,11 @@ def require_cookie(args: argparse.Namespace) -> str:
     return cookie
 
 
-def make_headers(cookie: str) -> dict[str, str]:
+def make_headers(cookie: str, base_url: str = "https://www.lidl.co.uk") -> dict[str, str]:
     return {
         "accept": "application/json",
         "accept-language": "en-GB,en;q=0.9",
-        "referer": "https://www.lidl.co.uk/mre/purchase-history",
+        "referer": f"{base_url}/mre/purchase-history",
         "user-agent": "Mozilla/5.0",
         "cookie": cookie,
     }
@@ -315,11 +362,13 @@ def get_json(
 
 def fetch_summaries(args: argparse.Namespace) -> dict[str, Any]:
     cookie = require_cookie(args)
-    headers = make_headers(cookie)
+    base_url = lidl_base_url(args.country)
+    headers = make_headers(cookie, base_url)
+    summary_url = f"{base_url}/mre/api/v1/tickets"
     limiter = RateLimiter(args.rate)
     output_path = args.data_dir / "receipts_summaries.json"
 
-    first_page = get_json(headers, SUMMARY_URL, {"country": args.country, "page": 1}, limiter, args.insecure)
+    first_page = get_json(headers, summary_url, {"country": args.country, "page": 1}, limiter, args.insecure)
     size = int(first_page.get("size") or len(first_page.get("items", [])) or 10)
     total_count = int(first_page.get("totalCount") or len(first_page.get("items", [])))
     total_pages = max(1, math.ceil(total_count / size))
@@ -327,7 +376,7 @@ def fetch_summaries(args: argparse.Namespace) -> dict[str, Any]:
 
     print(f"Summaries page 1/{total_pages}: {len(items)}/{total_count}")
     for page in range(2, total_pages + 1):
-        data = get_json(headers, SUMMARY_URL, {"country": args.country, "page": page}, limiter, args.insecure)
+        data = get_json(headers, summary_url, {"country": args.country, "page": page}, limiter, args.insecure)
         page_items = data.get("items", [])
         items.extend(page_items)
         print(f"Summaries page {page}/{total_pages}: {len(items)}/{total_count}", flush=True)
@@ -385,13 +434,15 @@ def merge_summary_items(existing: list[dict[str, Any]], new_items: list[dict[str
 
 def fetch_summaries_after(args: argparse.Namespace, since: datetime) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     cookie = require_cookie(args)
-    headers = make_headers(cookie)
+    base_url = lidl_base_url(args.country)
+    headers = make_headers(cookie, base_url)
+    summary_url = f"{base_url}/mre/api/v1/tickets"
     limiter = RateLimiter(args.rate)
     output_path = args.data_dir / "receipts_summaries.json"
 
     existing_export = load_summaries(args.data_dir)
     existing_items = list(existing_export.get("items", []))
-    first_page = get_json(headers, SUMMARY_URL, {"country": args.country, "page": 1}, limiter, args.insecure)
+    first_page = get_json(headers, summary_url, {"country": args.country, "page": 1}, limiter, args.insecure)
     size = int(first_page.get("size") or len(first_page.get("items", [])) or 10)
     total_count = int(first_page.get("totalCount") or len(first_page.get("items", [])))
     total_pages = max(1, math.ceil(total_count / size))
@@ -401,7 +452,7 @@ def fetch_summaries_after(args: argparse.Namespace, since: datetime) -> tuple[di
     while True:
         data = first_page if page == 1 else get_json(
             headers,
-            SUMMARY_URL,
+            summary_url,
             {"country": args.country, "page": page},
             limiter,
             args.insecure,
@@ -432,9 +483,10 @@ def fetch_summaries_after(args: argparse.Namespace, since: datetime) -> tuple[di
 
 
 def fetch_detail(headers: dict[str, str], receipt_id: str, args: argparse.Namespace, limiter: RateLimiter) -> Any:
+    detail_url = f"{lidl_base_url(args.country)}/mre/api/v1/tickets/{receipt_id}"
     return get_json(
         headers,
-        DETAIL_URL.format(ticket_id=receipt_id),
+        detail_url,
         {"country": args.country, "languageCode": args.language_code},
         limiter,
         args.insecure,
@@ -455,7 +507,7 @@ def fetch_details(args: argparse.Namespace, receipt_ids: list[str] | None = None
     if not to_fetch:
         return
 
-    headers = make_headers(cookie)
+    headers = make_headers(cookie, lidl_base_url(args.country))
     limiter = RateLimiter(args.rate)
     errors: list[dict[str, str]] = []
     success = 0
@@ -622,9 +674,10 @@ def command_update(args: argparse.Namespace) -> None:
 
 def command_auth_check(args: argparse.Namespace) -> None:
     cookie = require_cookie(args)
+    base_url = lidl_base_url(args.country)
     data = get_json(
-        make_headers(cookie),
-        SUMMARY_URL,
+        make_headers(cookie, base_url),
+        f"{base_url}/mre/api/v1/tickets",
         {"country": args.country, "page": 1},
         RateLimiter(args.rate),
         args.insecure,
