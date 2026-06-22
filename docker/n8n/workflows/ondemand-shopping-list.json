@@ -14,14 +14,24 @@
       }
     },
     {
+      "id": "d4e5f6a7-0001-0001-0001-000000000009",
+      "name": "Read Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "parameters": {
+        "jsCode": "return [{ json: { phoneNumber: process.env.SIGNAL_PHONE_NUMBER, groupId: process.env.SIGNAL_GROUP_ID } }];"
+      }
+    },
+    {
       "id": "d4e5f6a7-0001-0001-0001-000000000010",
       "name": "Receive Messages",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [250, 300],
+      "position": [500, 300],
       "parameters": {
         "method": "GET",
-        "url": "={{ 'http://signal-cli-rest-api:8080/v1/receive/' + $env.SIGNAL_PHONE_NUMBER + '?timeout=55' }}",
+        "url": "={{ 'http://signal-cli-rest-api:8080/v1/receive/' + $json.phoneNumber + '?timeout=55' }}",
         "options": {"timeout": 60000}
       }
     },
@@ -30,7 +40,7 @@
       "name": "Split Messages",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [500, 300],
+      "position": [750, 300],
       "parameters": {
         "jsCode": "const response = $input.first().json;\nconst messages = Array.isArray(response) ? response : [];\nif (messages.length === 0) return [];\nreturn messages.map(item => ({ json: item }));"
       }
@@ -40,7 +50,7 @@
       "name": "Is Shopping Command",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [750, 300],
+      "position": [1000, 300],
       "parameters": {
         "conditions": {
           "options": {"caseSensitive": false, "leftValue": "", "typeValidation": "strict"},
@@ -61,7 +71,7 @@
       "name": "Extract Days",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1000, 300],
+      "position": [1250, 300],
       "parameters": {
         "jsCode": "const msg = $input.first().json.envelope?.dataMessage?.message || '';\nconst match = msg.match(/--days[\\s=]+(\\d+)/i);\nconst days = match ? parseInt(match[1], 10) : 30;\nreturn [{ json: { days } }];"
       }
@@ -71,7 +81,7 @@
       "name": "Get Top Items",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1250, 300],
+      "position": [1500, 300],
       "parameters": {
         "method": "GET",
         "url": "=http://lidl-api:8000/top?days={{ $json.days }}",
@@ -83,9 +93,9 @@
       "name": "Format Message",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1500, 300],
+      "position": [1750, 300],
       "parameters": {
-        "jsCode": "const items = $input.first().json.items || [];\nconst days = $input.first().json.days || 30;\nlet msg = `🛒 Shopping suggestions (last ${days} days):\\n\\n`;\nif (items.length === 0) {\n  msg += 'No receipt data for this period.';\n} else {\n  items.slice(0, 10).forEach((item, i) => {\n    msg += `${i + 1}. ${item.name} (${item.count}×)\\n`;\n  });\n}\nreturn [{ json: { message: msg.trim() } }];"
+        "jsCode": "const items = $input.first().json.items || [];\nconst days = $input.first().json.days || 30;\nconst config = $('Read Config').first().json;\nlet msg = `🛒 Shopping suggestions (last ${days} days):\\n\\n`;\nif (items.length === 0) {\n  msg += 'No receipt data for this period.';\n} else {\n  items.slice(0, 10).forEach((item, i) => {\n    msg += `${i + 1}. ${item.name} (${item.count}×)\\n`;\n  });\n}\nreturn [{ json: { message: msg.trim(), phoneNumber: config.phoneNumber, groupId: config.groupId } }];"
       }
     },
     {
@@ -93,20 +103,23 @@
       "name": "Send to Signal",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1750, 300],
+      "position": [2000, 300],
       "parameters": {
         "method": "POST",
         "url": "http://signal-cli-rest-api:8080/v2/send",
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ message: $json.message, number: $env.SIGNAL_PHONE_NUMBER, recipients: [$env.SIGNAL_GROUP_ID] }) }}",
+        "body": "={{ JSON.stringify({ message: $json.message, number: $json.phoneNumber, recipients: [$json.groupId] }) }}",
         "options": {}
       }
     }
   ],
   "connections": {
     "Every Minute": {
+      "main": [[{"node": "Read Config", "type": "main", "index": 0}]]
+    },
+    "Read Config": {
       "main": [[{"node": "Receive Messages", "type": "main", "index": 0}]]
     },
     "Receive Messages": {
