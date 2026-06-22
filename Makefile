@@ -29,9 +29,11 @@ reauth:
 		--data-dir /data --country FR"
 
 signal-link:
+	@echo "Generating Signal link QR code (scan via Signal → Settings → Linked Devices → Link New Device)..."
 	ssh -i ~/.ssh/lidl_bot $(VM_USER)@$(VM_IP) \
-		"cd /opt/lidl/docker && docker compose exec signal-cli-rest-api \
-		signal-cli link -n LidlBot"
+		"sudo apt-get install -y -qq qrencode 2>/dev/null; \
+		cd /opt/lidl/docker && docker compose exec signal-cli-rest-api \
+		signal-cli link -n LidlBot 2>&1 | grep -m1 'sgnl://' | qrencode -t UTF8"
 
 signal-webhook:
 	ssh -i ~/.ssh/lidl_bot $(VM_USER)@$(VM_IP) \
