@@ -17,8 +17,9 @@ data/receipts_summaries.json
 data/receipts_detail.json
 data/lidl_auth_state.json
 
-# Brainstorm artefacts
+# Brainstorm artefacts and internal planning docs
 .superpowers/
+docs/superpowers/
 
 # Docker local dev
 docker/dev-data/
