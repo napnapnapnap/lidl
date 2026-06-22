@@ -14,7 +14,7 @@ card-totals:
 VM_USER ?= debian
 VM_IP   ?=
 
-.PHONY: ssh-tunnel ssh-vm reauth signal-link signal-webhook setup-workflows
+.PHONY: ssh-tunnel ssh-vm reauth signal-link setup-workflows
 
 ssh-tunnel:
 	ssh -i ~/.ssh/lidl_bot -L 5678:localhost:5678 $(VM_USER)@$(VM_IP)
@@ -34,12 +34,6 @@ signal-link:
 		"sudo apt-get install -y -qq qrencode 2>/dev/null; \
 		cd /opt/lidl/docker && docker compose exec signal-cli-rest-api \
 		signal-cli --config /home/.local/share/signal-cli link -n LidlBot 2>&1 | grep -m1 'sgnl://' | qrencode -t UTF8"
-
-signal-webhook:
-	ssh -i ~/.ssh/lidl_bot $(VM_USER)@$(VM_IP) \
-		"curl -sf -X POST http://localhost:8080/v1/configuration/account/$(SIGNAL_PHONE)/settings \
-		-H 'Content-Type: application/json' \
-		-d '{\"webhook\":{\"url\":\"http://n8n:5678/webhook/signal\"}}'"
 
 setup-workflows:
 	ssh -i ~/.ssh/lidl_bot $(VM_USER)@$(VM_IP) \
