@@ -19,6 +19,7 @@ docker compose -f "$COMPOSE_FILE" exec -T n8n \
 
 echo ""
 echo "Done. Workflows imported."
+echo "Note: activate workflows manually in the n8n UI at http://localhost:5678"
 echo ""
 echo "Next steps:"
 echo "  1. Open n8n UI: ssh -L 5678:localhost:5678 debian@VM_IP then http://localhost:5678"

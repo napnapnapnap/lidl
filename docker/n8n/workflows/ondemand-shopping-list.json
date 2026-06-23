@@ -31,8 +31,8 @@
       "position": [500, 300],
       "parameters": {
         "method": "GET",
-        "url": "={{ 'http://signal-cli-rest-api:8080/v1/receive/' + $json.phoneNumber + '?timeout=0' }}",
-        "options": {"timeout": 10000}
+        "url": "={{ 'http://signal-cli-rest-api:8080/v1/receive/' + $json.phoneNumber + '?timeout=10' }}",
+        "options": {"timeout": 60000}
       }
     },
     {
@@ -42,7 +42,7 @@
       "typeVersion": 2,
       "position": [750, 300],
       "parameters": {
-        "jsCode": "const response = $input.first().json;\nconst messages = Array.isArray(response) ? response : [];\nif (messages.length === 0) return [];\nreturn messages.map(item => ({ json: item }));"
+        "jsCode": "const raw = $input.first().json;\nlet messages;\ntry { messages = JSON.parse(raw.data); } catch(e) { messages = []; }\nif (!Array.isArray(messages) || messages.length === 0) return [];\nreturn messages.map(item => ({ json: item }));"
       }
     },
     {

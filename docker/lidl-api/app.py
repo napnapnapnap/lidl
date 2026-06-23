@@ -204,6 +204,8 @@ def top(days: int = Query(default=30, ge=1)) -> dict:
         if date_str:
             try:
                 dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
                 if dt < cutoff:
                     continue
             except ValueError:
