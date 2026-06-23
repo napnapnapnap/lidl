@@ -57,7 +57,7 @@
           "conditions": [
             {
               "id": "cond-shopping",
-              "leftValue": "={{ ($json.envelope?.dataMessage?.message || '').toLowerCase().trim() }}",
+              "leftValue": "={{ ($json.envelope?.dataMessage?.message || $json.envelope?.syncMessage?.sentMessage?.message || '').toLowerCase().trim() }}",
               "rightValue": "/shopping",
               "operator": {"type": "string", "operation": "startsWith"}
             }
@@ -73,7 +73,7 @@
       "typeVersion": 2,
       "position": [1250, 300],
       "parameters": {
-        "jsCode": "const msg = $input.first().json.envelope?.dataMessage?.message || '';\nconst match = msg.match(/--days[\\s=]+(\\d+)/i);\nconst days = match ? parseInt(match[1], 10) : 30;\nreturn [{ json: { days } }];"
+        "jsCode": "const env = $input.first().json.envelope || {};\nconst msg = env.dataMessage?.message || env.syncMessage?.sentMessage?.message || '';\nconst match = msg.match(/--days[\\s=]+(\\d+)/i);\nconst days = match ? parseInt(match[1], 10) : 30;\nreturn [{ json: { days } }];"
       }
     },
     {
