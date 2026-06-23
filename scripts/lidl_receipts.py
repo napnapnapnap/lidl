@@ -703,7 +703,7 @@ def parse_float(value: str | None) -> float | None:
     if value in {None, ""}:
         return None
     try:
-        return float(value)
+        return float(str(value).replace(",", "."))
     except ValueError:
         return None
 
@@ -785,9 +785,9 @@ def parse_html_receipt(receipt_html: str) -> dict[str, Any]:
         vat_items.append(
             {
                 "tax_type": vat.group(1),
-                "percentage": float(vat.group(2)),
-                "base_amount": float(vat.group(3)),
-                "tax_amount": float(vat.group(4)),
+                "percentage": parse_float(vat.group(2)),
+                "base_amount": parse_float(vat.group(3)),
+                "tax_amount": parse_float(vat.group(4)),
             }
         )
 

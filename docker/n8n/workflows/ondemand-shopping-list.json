@@ -20,7 +20,7 @@
       "typeVersion": 2,
       "position": [250, 300],
       "parameters": {
-        "jsCode": "return [{ json: { phoneNumber: process.env.SIGNAL_PHONE_NUMBER, groupId: process.env.SIGNAL_GROUP_ID } }];"
+        "jsCode": "return [{ json: { phoneNumber: $env.SIGNAL_PHONE_NUMBER, groupId: $env.SIGNAL_GROUP_ID } }];"
       }
     },
     {
@@ -31,8 +31,8 @@
       "position": [500, 300],
       "parameters": {
         "method": "GET",
-        "url": "={{ 'http://signal-cli-rest-api:8080/v1/receive/' + $json.phoneNumber + '?timeout=55' }}",
-        "options": {"timeout": 60000}
+        "url": "={{ 'http://signal-cli-rest-api:8080/v1/receive/' + $json.phoneNumber + '?timeout=0' }}",
+        "options": {"timeout": 10000}
       }
     },
     {
